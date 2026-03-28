@@ -1,0 +1,45 @@
+📋 Windows用户使用说明
+
+本目录中的可执行文件是在Linux上生成的，Windows用户需要:
+
+1. **重命名文件**
+   将文件重命名为 .exe 后缀:
+   - 主程序 → 主程序.exe
+   - 网络波动检测器 → 网络波动检测器.exe
+   - 等等...
+
+2. **使用Wine运行** (推荐方法)
+   ```bash
+   # 安装Wine
+   # 然后运行
+   wine 工具名.exe
+   ```
+
+3. **或在Windows上重新编译**
+   ```bash
+   # 在Windows上安装Python和PyInstaller
+   pip install pyinstaller
+   pyinstaller --onefile 工具名.py
+   ```
+
+4. **直接从GitHub下载Windows版本**
+   访问: https://github.com/limaohui1-ctrl/stone-age-tools
+
+📁 工具分类
+- 核心工具/     - 网络稳定性相关工具
+- 部署工具/     - 自动化部署工具
+- 监控工具/     - 进度监控工具
+- 实用工具/     - 其他实用工具
+
+🚀 快速开始
+1. 将需要的工具复制到Windows
+2. 重命名为.exe后缀
+3. 使用Wine运行或重新编译
+
+⚠️ 注意事项
+- 文件较大是正常现象（包含Python运行时）
+- 可能需要安装VC++运行库
+- 防病毒软件可能误报
+
+📞 技术支持
+请参考各工具的说明文件或联系开发者。
