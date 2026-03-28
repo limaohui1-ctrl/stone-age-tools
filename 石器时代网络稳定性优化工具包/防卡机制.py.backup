@@ -1,0 +1,474 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+石器时代网络稳定性优化工具包 - 防卡机制
+专门解决石器时代脚本因各种原因卡住的核心模块
+
+功能:
+1. 实时监控脚本执行状态
+2. 检测卡顿和死锁
+3. 自动恢复和继续执行
+4. 位置验证和异常坐标纠正
+5. 与ASSA脚本深度集成
+
+设计原则:
+- 实时监控，快速响应
+- 智能判断，准确识别卡顿
+- 安全恢复，避免数据丢失
+- 低侵入性，易于集成
+"""
+
+import time
+import threading
+import json
+import logging
+from dataclasses import dataclass, asdict
+from typing import Dict, List, Optional, Tuple, Callable, Any
+from enum import Enum
+from datetime import datetime, timedelta
+import statistics
+
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('防卡机制日志.log', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+
+class StuckType(Enum):
+    """卡顿类型枚举"""
+    POSITION_STUCK = "位置卡顿"        # 位置长时间不变
+    NETWORK_STUCK = "网络卡顿"        # 网络响应超时
+    RESOURCE_STUCK = "资源卡顿"       # 资源等待超时
+    LOGIC_STUCK = "逻辑卡顿"          # 逻辑循环卡住
+    UI_STUCK = "界面卡顿"             # 界面无响应
+    UNKNOWN_STUCK = "未知卡顿"        # 其他类型卡顿
+
+
+class RecoveryAction(Enum):
+    """恢复动作枚举"""
+    WAIT_AND_RETRY = "等待重试"       # 等待后重试
+    CHANGE_POSITION = "改变位置"      # 移动到新位置
+    RESTART_SCRIPT = "重启脚本"       # 重启脚本
+    SKIP_STEP = "跳过步骤"            # 跳过当前步骤
+    FALLBACK = "回退操作"             # 回退到上一步
+    MANUAL_INTERVENTION = "人工干预"  # 需要人工干预
+
+
+@dataclass
+class StuckEvent:
+    """卡顿事件数据类"""
+    event_id: str
+    timestamp: datetime
+    stuck_type: StuckType
+    position: Optional[Tuple[int, int]] = None  # 卡顿位置(x,y)
+    duration: float = 0.0  # 卡顿持续时间(秒)
+    detection_method: str = ""
+    recovery_action: Optional[RecoveryAction] = None
+    recovery_time: Optional[float] = None  # 恢复时间(秒)
+    context_data: Optional[Dict] = None
+    
+    def to_dict(self) -> Dict:
+        """转换为字典"""
+        data = asdict(self)
+        data['timestamp'] = self.timestamp.isoformat()
+        data['stuck_type'] = self.stuck_type.value
+        if self.recovery_action:
+            data['recovery_action'] = self.recovery_action.value
+        if self.position:
+            data['position'] = list(self.position)
+        return data
+
+
+@dataclass
+class PositionCheckpoint:
+    """位置检查点数据类"""
+    checkpoint_id: str
+    timestamp: datetime
+    position: Tuple[int, int]  # (x, y)
+    map_name: str
+    expected_next: Optional[Tuple[int, int]] = None
+    tolerance: int = 3  # 位置容差(像素)
+    timeout: float = 30.0  # 超时时间(秒)
+    
+    def to_dict(self) -> Dict:
+        """转换为字典"""
+        data = asdict(self)
+        data['timestamp'] = self.timestamp.isoformat()
+        data['position'] = list(self.position)
+        if self.expected_next:
+            data['expected_next'] = list(self.expected_next)
+        return data
+
+
+class AntiStuckMechanism:
+    """防卡机制核心类"""
+    
+    def __init__(self, config_path: str = "防卡机制配置.json"):
+        """
+        初始化防卡机制
+        
+        Args:
+            config_path: 配置文件路径
+        """
+        self.config = self._load_config(config_path)
+        self.stuck_events: List[StuckEvent] = []
+        self.position_history: List[PositionCheckpoint] = []
+        self.monitoring_thread: Optional[threading.Thread] = None
+        self.is_monitoring = False
+        
+        # 状态跟踪
+        self.current_state = {
+            "last_position": None,
+            "last_position_time": None,
+            "last_activity": None,
+            "current_map": None,
+            "script_step": 0,
+            "consecutive_failures": 0,
+            "recovery_in_progress": False
+        }
+        
+        # 统计信息
+        self.stats = {
+            "total_stuck_events": 0,
+            "successful_recoveries": 0,
+            "failed_recoveries": 0,
+            "total_downtime": 0.0,  # 总卡顿时间(秒)
+            "avg_recovery_time": 0.0,
+            "most_common_stuck_type": None,
+            "most_effective_action": None,
+        }
+        
+        # 检测器集合
+        self.detectors = {
+            "position": self._detect_position_stuck,
+            "network": self._detect_network_stuck,
+            "resource": self._detect_resource_stuck,
+            "logic": self._detect_logic_stuck,
+            "ui": self._detect_ui_stuck,
+        }
+        
+        # 恢复策略集合
+        self.recovery_strategies = {
+            StuckType.POSITION_STUCK: self._recover_position_stuck,
+            StuckType.NETWORK_STUCK: self._recover_network_stuck,
+            StuckType.RESOURCE_STUCK: self._recover_resource_stuck,
+            StuckType.LOGIC_STUCK: self._recover_logic_stuck,
+            StuckType.UI_STUCK: self._recover_ui_stuck,
+            StuckType.UNKNOWN_STUCK: self._recover_unknown_stuck,
+        }
+        
+        logger.info("防卡机制初始化完成")
+    
+    def _load_config(self, config_path: str) -> Dict:
+        """加载配置文件"""
+        default_config = {
+            "monitoring_interval": 2.0,  # 监控间隔(秒)
+            "detection_thresholds": {
+                "position_stuck": 15.0,  # 位置卡顿阈值(秒)
+                "network_stuck": 10.0,   # 网络卡顿阈值(秒)
+                "resource_stuck": 30.0,  # 资源卡顿阈值(秒)
+                "logic_stuck": 60.0,     # 逻辑卡顿阈值(秒)
+                "ui_stuck": 20.0,        # 界面卡顿阈值(秒)
+            },
+            "recovery_strategies": {
+                "position_stuck": {
+                    "max_wait": 30.0,
+                    "position_change_distance": 10,
+                    "fallback_positions": [],
+                    "use_escape_route": True,
+                },
+                "network_stuck": {
+                    "max_retries": 3,
+                    "retry_delay": 5.0,
+                    "switch_server": False,
+                    "reconnect_timeout": 60.0,
+                },
+                "resource_stuck": {
+                    "alternative_resources": [],
+                    "skip_if_unavailable": True,
+                    "wait_multiplier": 2.0,
+                },
+                "logic_stuck": {
+                    "skip_step": True,
+                    "restart_from_checkpoint": True,
+                    "max_restarts": 2,
+                },
+                "ui_stuck": {
+                    "refresh_ui": True,
+                    "reset_ui_state": True,
+                    "use_keyboard_shortcuts": True,
+                }
+            },
+            "position_validation": {
+                "enable": True,
+                "check_interval": 5.0,
+                "position_tolerance": 3,
+                "max_position_errors": 3,
+                "auto_correction": True,
+            },
+            "learning_mode": {
+                "enabled": True,
+                "collect_data": True,
+                "adaptive_thresholds": True,
+                "strategy_optimization": True,
+            },
+            "integration": {
+                "with_assascript": True,
+                "hook_functions": True,
+                "auto_recovery": True,
+                "notify_user": True,
+            }
+        }
+        
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                user_config = json.load(f)
+                default_config.update(user_config)
+                logger.info(f"从 {config_path} 加载配置")
+        except FileNotFoundError:
+            logger.info(f"配置文件 {config_path} 不存在，使用默认配置")
+            # 保存默认配置
+            with open(config_path, 'w', encoding='utf-8') as f:
+                json.dump(default_config, f, ensure_ascii=False, indent=2)
+        
+        return default_config
+    
+    def _detect_position_stuck(self) -> Optional[StuckEvent]:
+        """检测位置卡顿"""
+        if not self.current_state["last_position"] or not self.current_state["last_position_time"]:
+            return None
+        
+        current_time = time.time()
+        position_age = current_time - self.current_state["last_position_time"]
+        
+        threshold = self.config["detection_thresholds"]["position_stuck"]
+        
+        if position_age > threshold:
+            # 位置长时间未变化，可能卡顿
+            event = StuckEvent(
+                event_id=f"pos_stuck_{int(time.time())}",
+                timestamp=datetime.now(),
+                stuck_type=StuckType.POSITION_STUCK,
+                position=self.current_state["last_position"],
+                duration=position_age,
+                detection_method="位置长时间未变化",
+                context_data={
+                    "position_age": position_age,
+                    "threshold": threshold,
+                    "map": self.current_state["current_map"],
+                }
+            )
+            return event
+        
+        return None
+    
+    def _detect_network_stuck(self) -> Optional[StuckEvent]:
+        """检测网络卡顿"""
+        # 这里可以集成网络监控器的数据
+        # 暂时使用简化检测
+        
+        # 检查最近是否有网络活动
+        if self.current_state["last_activity"]:
+            activity_age = time.time() - self.current_state["last_activity"]
+            threshold = self.config["detection_thresholds"]["network_stuck"]
+            
+            if activity_age > threshold:
+                event = StuckEvent(
+                    event_id=f"net_stuck_{int(time.time())}",
+                    timestamp=datetime.now(),
+                    stuck_type=StuckType.NETWORK_STUCK,
+                    duration=activity_age,
+                    detection_method="网络活动长时间停止",
+                    context_data={
+                        "activity_age": activity_age,
+                        "threshold": threshold,
+                    }
+                )
+                return event
+        
+        return None
+    
+    def _detect_resource_stuck(self) -> Optional[StuckEvent]:
+        """检测资源卡顿"""
+        # 检测资源等待超时
+        # 这里可以集成资源监控
+        
+        # 简化版本：检查连续失败次数
+        if self.current_state["consecutive_failures"] >= 3:
+            event = StuckEvent(
+                event_id=f"res_stuck_{int(time.time())}",
+                timestamp=datetime.now(),
+                stuck_type=StuckType.RESOURCE_STUCK,
+                duration=self.current_state["consecutive_failures"] * 10,  # 估计时间
+                detection_method="连续操作失败",
+                context_data={
+                    "consecutive_failures": self.current_state["consecutive_failures"],
+                }
+            )
+            return event
+        
+        return None
+    
+    def _detect_logic_stuck(self) -> Optional[StuckEvent]:
+        """检测逻辑卡顿"""
+        # 检测逻辑循环或死锁
+        # 可以通过检查脚本步骤是否长时间不变来判断
+        
+        # 简化版本：检查脚本步骤长时间不变
+        if "last_step_time" in self.current_state:
+            step_age = time.time() - self.current_state["last_step_time"]
+            threshold = self.config["detection_thresholds"]["logic_stuck"]
+            
+            if step_age > threshold:
+                event = StuckEvent(
+                    event_id=f"logic_stuck_{int(time.time())}",
+                    timestamp=datetime.now(),
+                    stuck_type=StuckType.LOGIC_STUCK,
+                    duration=step_age,
+                    detection_method="脚本步骤长时间未推进",
+                    context_data={
+                        "step_age": step_age,
+                        "threshold": threshold,
+                        "current_step": self.current_state["script_step"],
+                    }
+                )
+                return event
+        
+        return None
+    
+    def _detect_ui_stuck(self) -> Optional[StuckEvent]:
+        """检测界面卡顿"""
+        # 检测界面无响应
+        # 可以通过检查界面元素状态来判断
+        
+        # 简化版本：使用超时检测
+        threshold = self.config["detection_thresholds"]["ui_stuck"]
+        
+        # 这里可以集成界面监控
+        # 暂时返回None
+        return None
+    
+    def _recover_position_stuck(self, event: StuckEvent) -> RecoveryAction:
+        """恢复位置卡顿"""
+        strategies = self.config["recovery_strategies"]["position_stuck"]
+        
+        # 策略1: 等待一段时间
+        if event.duration < strategies["max_wait"]:
+            logger.info(f"位置卡顿，尝试等待恢复 (已卡顿 {event.duration:.1f} 秒)")
+            return RecoveryAction.WAIT_AND_RETRY
+        
+        # 策略2: 改变位置
+        if strategies.get("position_change_distance", 0) > 0:
+            logger.info(f"位置卡顿，尝试改变位置")
+            return RecoveryAction.CHANGE_POSITION
+        
+        # 策略3: 使用逃生路线
+        if strategies.get("use_escape_route", False):
+            logger.info(f"位置卡顿，尝试使用逃生路线")
+            return RecoveryAction.FALLBACK
+        
+        # 默认策略: 回退操作
+        return RecoveryAction.FALLBACK
+    
+    def _recover_network_stuck(self, event: StuckEvent) -> RecoveryAction:
+        """恢复网络卡顿"""
+        strategies = self.config["recovery_strategies"]["network_stuck"]
+        
+        # 策略1: 等待重试
+        max_retries = strategies.get("max_retries", 3)
+        if self.current_state.get("network_retries", 0) < max_retries:
+            logger.info(f"网络卡顿，尝试重试 ({self.current_state.get('network_retries', 0)+1}/{max_retries})")
+            return RecoveryAction.WAIT_AND_RETRY
+        
+        # 策略2: 切换服务器（如果配置）
+        if strategies.get("switch_server", False):
+            logger.info(f"网络卡顿，尝试切换服务器")
+            return RecoveryAction.FALLBACK
+        
+        # 默认策略: 需要人工干预
+        return RecoveryAction.MANUAL_INTERVENTION
+    
+    def _recover_resource_stuck(self, event: StuckEvent) -> RecoveryAction:
+        """恢复资源卡顿"""
+        strategies = self.config["recovery_strategies"]["resource_stuck"]
+        
+        # 策略1: 使用替代资源
+        if strategies.get("alternative_resources"):
+            logger.info(f"资源卡顿，尝试使用替代资源")
+            return RecoveryAction.SKIP_STEP
+        
+        # 策略2: 跳过如果不可用
+        if strategies.get("skip_if_unavailable", True):
+            logger.info(f"资源卡顿，跳过当前步骤")
+            return RecoveryAction.SKIP_STEP
+        
+        # 默认策略: 等待重试
+        return RecoveryAction.WAIT_AND_RETRY
+    
+    def _recover_logic_stuck(self, event: StuckEvent) -> RecoveryAction:
+        """恢复逻辑卡顿"""
+        strategies = self.config["recovery_strategies"]["logic_stuck"]
+        
+        # 策略1: 跳过步骤
+        if strategies.get("skip_step", True):
+            logger.info(f"逻辑卡顿，尝试跳过当前步骤")
+            return RecoveryAction.SKIP_STEP
+        
+        # 策略2: 从检查点重启
+        if strategies.get("restart_from_checkpoint", True):
+            logger.info(f"逻辑卡顿，尝试从检查点重启")
+            return RecoveryAction.RESTART_SCRIPT
+        
+        # 默认策略: 需要人工干预
+        return RecoveryAction.MANUAL_INTERVENTION
+    
+    def _recover_ui_stuck(self, event: StuckEvent) -> RecoveryAction:
+        """恢复界面卡顿"""
+        strategies = self.config["recovery_strategies"]["ui_stuck"]
+        
+        # 策略1: 刷新界面
+        if strategies.get("refresh_ui", True):
+            logger.info(f"界面卡顿，尝试刷新界面")
+            return RecoveryAction.FALLBACK
+        
+        # 策略2: 重置界面状态
+        if strategies.get("reset_ui_state", True):
+            logger.info(f"界面卡顿，尝试重置界面状态")
+            return RecoveryAction.RESTART_SCRIPT
+        
+        # 默认策略: 需要人工干预
+        return RecoveryAction.MANUAL_INTERVENTION
+    
+    def _recover_unknown_stuck(self, event: StuckEvent) -> RecoveryAction:
+        """恢复未知卡顿"""
+        # 尝试多种恢复策略
+        
+        # 首先尝试等待重试
+        if event.duration < 30:
+            logger.info(f"未知卡顿，尝试等待重试")
+            return RecoveryAction.WAIT_AND_RETRY
+        
+        # 然后尝试回退操作
+        logger.info(f"未知卡顿，尝试回退操作")
+        return RecoveryAction.FALLBACK
+    
+    def _monitoring_loop(self):
+        """监控循环"""
+        logger.info("防卡监控开始运行")
+        
+        while self.is_monitoring:
+            try:
+                # 运行所有检测器
+                detected_events = []
+                
+                for detector_name, detector_func in self.detectors.items():
+                    event = detector_func()
+                    if event:
+                        detected_events.append(event)
+                

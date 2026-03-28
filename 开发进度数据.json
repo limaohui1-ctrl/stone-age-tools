@@ -1,0 +1,121 @@
+{
+  "start_time": "2026-03-28T11:28:50.286411",
+  "last_update": "2026-03-28T11:28:50.286430",
+  "projects": {
+    "石器时代网络稳定性优化工具包": {
+      "name": "石器时代网络稳定性优化工具包",
+      "exists": true,
+      "files_exist": [
+        "主程序.py",
+        "网络波动检测器.py",
+        "智能重试系统.py",
+        "防卡机制.py",
+        "性能监控仪表板.py"
+      ],
+      "files_missing": [],
+      "file_count": 5,
+      "total_files": 5,
+      "last_modified": 1774668298.0191023,
+      "size_kb": 94.220703125,
+      "progress": 100.0,
+      "status": "completed"
+    },
+    "石器时代脚本自动化部署系统": {
+      "name": "石器时代脚本自动化部署系统",
+      "exists": true,
+      "files_exist": [
+        "主程序.py",
+        "打包引擎.py",
+        "配置引擎.py",
+        "部署引擎.py"
+      ],
+      "files_missing": [],
+      "file_count": 4,
+      "total_files": 4,
+      "last_modified": 1774648913.1979666,
+      "size_kb": 73.296875,
+      "progress": 100.0,
+      "status": "completed"
+    },
+    "EXE优化工具": {
+      "name": "EXE优化工具",
+      "exists": true,
+      "files_exist": [
+        "快速EXE优化.py",
+        "EXE优化与上传计划.md"
+      ],
+      "files_missing": [],
+      "file_count": 2,
+      "total_files": 2,
+      "last_modified": null,
+      "size_kb": 0,
+      "status": "completed",
+      "progress": 100
+    },
+    "实时演示系统": {
+      "name": "实时演示系统",
+      "exists": true,
+      "files_exist": [
+        "交互式演示.py"
+      ],
+      "files_missing": [],
+      "file_count": 1,
+      "total_files": 1,
+      "last_modified": 1774652193.7285798,
+      "size_kb": 10.341796875,
+      "progress": 100.0,
+      "status": "completed"
+    },
+    "用户展示包": {
+      "name": "用户展示包",
+      "exists": true,
+      "files_exist": [
+        "完整成果总结报告.md",
+        "快速开始指南.md"
+      ],
+      "files_missing": [],
+      "file_count": 2,
+      "total_files": 2,
+      "last_modified": 1774650464.5235949,
+      "size_kb": 18.3505859375,
+      "progress": 100.0,
+      "status": "completed"
+    },
+    "EXE优化进度": {
+      "name": "EXE优化进度",
+      "status": "not_started",
+      "optimized_tools": 0,
+      "total_tools": 109,
+      "output_directory_exists": false,
+      "exe_files": [],
+      "progress": 0
+    },
+    "OpenClaw Gateway": {
+      "name": "OpenClaw Gateway",
+      "status": "inactive",
+      "is_running": false,
+      "last_check": "2026-03-28T11:28:50.286716"
+    }
+  },
+  "metrics": {
+    "total_projects": 6,
+    "completed_projects": 5,
+    "in_progress_projects": 1,
+    "average_progress": 83.3,
+    "overall_status": "excellent"
+  },
+  "alerts": [
+    {
+      "level": "warning",
+      "message": "Gateway服务未运行，可能影响通信",
+      "timestamp": "2026-03-28T11:28:50.291214",
+      "action": "启动Gateway服务"
+    },
+    {
+      "level": "warning",
+      "message": "EXE优化尚未开始",
+      "timestamp": "2026-03-28T11:28:50.291224",
+      "action": "启动EXE优化工具"
+    }
+  ]
+}
