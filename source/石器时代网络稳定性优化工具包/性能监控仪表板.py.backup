@@ -1,0 +1,482 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+石器时代网络稳定性优化工具包 - 性能监控仪表板
+可视化展示网络状态、脚本执行情况和稳定性指标
+
+功能:
+1. 实时网络状态监控图表
+2. 脚本执行性能分析
+3. 稳定性指标可视化
+4. 历史数据趋势分析
+5. 预警和通知系统
+
+设计原则:
+- 实时可视化，直观易懂
+- 低资源占用，高性能
+- 模块化设计，易于扩展
+- 数据驱动，智能分析
+"""
+
+import time
+import json
+import logging
+import threading
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Tuple, Any
+from dataclasses import dataclass, asdict
+from enum import Enum
+import statistics
+
+# 尝试导入可视化库，如果不可用则使用文本模式
+try:
+    import matplotlib.pyplot as plt
+    import matplotlib.dates as mdates
+    from matplotlib.figure import Figure
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    HAS_MATPLOTLIB = True
+except ImportError:
+    HAS_MATPLOTLIB = False
+    print("警告: matplotlib不可用，将使用文本模式显示")
+
+try:
+    import pandas as pd
+    HAS_PANDAS = True
+except ImportError:
+    HAS_PANDAS = False
+
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('仪表板日志.log', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+
+class MetricType(Enum):
+    """指标类型枚举"""
+    NETWORK_LATENCY = "网络延迟"
+    NETWORK_PACKET_LOSS = "网络丢包"
+    NETWORK_JITTER = "网络抖动"
+    SCRIPT_SUCCESS_RATE = "脚本成功率"
+    RETRY_EFFICIENCY = "重试效率"
+    STUCK_EVENTS = "卡顿事件"
+    RECOVERY_TIME = "恢复时间"
+    PERFORMANCE_SCORE = "性能评分"
+
+
+@dataclass
+class MetricDataPoint:
+    """指标数据点"""
+    timestamp: datetime
+    metric_type: MetricType
+    value: float
+    unit: str = ""
+    tags: Optional[Dict] = None
+    
+    def to_dict(self) -> Dict:
+        """转换为字典"""
+        data = asdict(self)
+        data['timestamp'] = self.timestamp.isoformat()
+        data['metric_type'] = self.metric_type.value
+        return data
+
+
+@dataclass
+class Alert:
+    """警报"""
+    alert_id: str
+    timestamp: datetime
+    severity: str  # 低/中/高/严重
+    metric_type: MetricType
+    current_value: float
+    threshold: float
+    message: str
+    resolved: bool = False
+    resolved_at: Optional[datetime] = None
+    
+    def to_dict(self) -> Dict:
+        """转换为字典"""
+        data = asdict(self)
+        data['timestamp'] = self.timestamp.isoformat()
+        data['resolved_at'] = self.resolved_at.isoformat() if self.resolved_at else None
+        data['metric_type'] = self.metric_type.value
+        return data
+
+
+class PerformanceDashboard:
+    """性能监控仪表板核心类"""
+    
+    def __init__(self, config_path: str = "仪表板配置.json"):
+        """
+        初始化性能监控仪表板
+        
+        Args:
+            config_path: 配置文件路径
+        """
+        self.config = self._load_config(config_path)
+        self.metrics_data: Dict[MetricType, List[MetricDataPoint]] = {}
+        self.active_alerts: List[Alert] = []
+        self.alert_history: List[Alert] = []
+        self.is_monitoring = False
+        self.monitor_thread: Optional[threading.Thread] = None
+        
+        # 初始化指标存储
+        for metric in MetricType:
+            self.metrics_data[metric] = []
+        
+        # 统计信息
+        self.stats = {
+            "total_metrics_collected": 0,
+            "active_alerts_count": 0,
+            "alerts_resolved": 0,
+            "data_retention_days": 7,
+            "last_update": None,
+        }
+        
+        # 性能评分
+        self.performance_scores = {
+            "network_stability": 0.0,
+            "script_reliability": 0.0,
+            "recovery_efficiency": 0.0,
+            "overall_score": 0.0,
+        }
+        
+        logger.info("性能监控仪表板初始化完成")
+        if not HAS_MATPLOTLIB:
+            logger.warning("matplotlib不可用，图表功能受限")
+    
+    def _load_config(self, config_path: str) -> Dict:
+        """加载配置文件"""
+        default_config = {
+            "monitoring_interval": 5.0,  # 监控间隔(秒)
+            "data_retention": {
+                "max_points_per_metric": 1000,
+                "auto_cleanup": True,
+                "cleanup_interval_hours": 24,
+            },
+            "alert_thresholds": {
+                "network_latency": {
+                    "warning": 200,   # 警告阈值(ms)
+                    "critical": 500,  # 严重阈值(ms)
+                },
+                "network_packet_loss": {
+                    "warning": 10,    # 警告阈值(%)
+                    "critical": 30,   # 严重阈值(%)
+                },
+                "script_success_rate": {
+                    "warning": 0.8,   # 警告阈值
+                    "critical": 0.5,  # 严重阈值
+                },
+                "recovery_time": {
+                    "warning": 30.0,  # 警告阈值(秒)
+                    "critical": 60.0, # 严重阈值(秒)
+                }
+            },
+            "visualization": {
+                "enable_charts": HAS_MATPLOTLIB,
+                "chart_style": "seaborn",
+                "update_interval": 10.0,
+                "save_charts": True,
+                "chart_format": "png",
+            },
+            "integration": {
+                "with_network_monitor": True,
+                "with_retry_system": True,
+                "with_anti_stuck": True,
+                "auto_collect_metrics": True,
+            }
+        }
+        
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                user_config = json.load(f)
+                default_config.update(user_config)
+                logger.info(f"从 {config_path} 加载配置")
+        except FileNotFoundError:
+            logger.info(f"配置文件 {config_path} 不存在，使用默认配置")
+            # 保存默认配置
+            with open(config_path, 'w', encoding='utf-8') as f:
+                json.dump(default_config, f, ensure_ascii=False, indent=2)
+        
+        return default_config
+    
+    def add_metric(self, metric_type: MetricType, value: float, unit: str = "", tags: Optional[Dict] = None):
+        """添加指标数据"""
+        data_point = MetricDataPoint(
+            timestamp=datetime.now(),
+            metric_type=metric_type,
+            value=value,
+            unit=unit,
+            tags=tags
+        )
+        
+        # 添加到对应指标列表
+        self.metrics_data[metric_type].append(data_point)
+        
+        # 限制数据量
+        max_points = self.config["data_retention"]["max_points_per_metric"]
+        if len(self.metrics_data[metric_type]) > max_points:
+            self.metrics_data[metric_type].pop(0)
+        
+        # 更新统计
+        self.stats["total_metrics_collected"] += 1
+        self.stats["last_update"] = datetime.now()
+        
+        # 检查警报
+        self._check_alerts(metric_type, value)
+        
+        # 更新性能评分
+        self._update_performance_scores()
+        
+        return data_point
+    
+    def _check_alerts(self, metric_type: MetricType, value: float):
+        """检查警报阈值"""
+        thresholds = self.config["alert_thresholds"]
+        
+        if metric_type == MetricType.NETWORK_LATENCY:
+            if value > thresholds["network_latency"]["critical"]:
+                self._create_alert(
+                    metric_type=metric_type,
+                    current_value=value,
+                    threshold=thresholds["network_latency"]["critical"],
+                    severity="严重",
+                    message=f"网络延迟严重: {value:.1f}ms > {thresholds['network_latency']['critical']}ms"
+                )
+            elif value > thresholds["network_latency"]["warning"]:
+                self._create_alert(
+                    metric_type=metric_type,
+                    current_value=value,
+                    threshold=thresholds["network_latency"]["warning"],
+                    severity="高",
+                    message=f"网络延迟高: {value:.1f}ms > {thresholds['network_latency']['warning']}ms"
+                )
+        
+        elif metric_type == MetricType.NETWORK_PACKET_LOSS:
+            if value > thresholds["network_packet_loss"]["critical"]:
+                self._create_alert(
+                    metric_type=metric_type,
+                    current_value=value,
+                    threshold=thresholds["network_packet_loss"]["critical"],
+                    severity="严重",
+                    message=f"网络丢包严重: {value:.1f}% > {thresholds['network_packet_loss']['critical']}%"
+                )
+            elif value > thresholds["network_packet_loss"]["warning"]:
+                self._create_alert(
+                    metric_type=metric_type,
+                    current_value=value,
+                    threshold=thresholds["network_packet_loss"]["warning"],
+                    severity="高",
+                    message=f"网络丢包高: {value:.1f}% > {thresholds['network_packet_loss']['warning']}%"
+                )
+        
+        elif metric_type == MetricType.SCRIPT_SUCCESS_RATE:
+            if value < thresholds["script_success_rate"]["critical"]:
+                self._create_alert(
+                    metric_type=metric_type,
+                    current_value=value,
+                    threshold=thresholds["script_success_rate"]["critical"],
+                    severity="严重",
+                    message=f"脚本成功率低: {value:.1%} < {thresholds['script_success_rate']['critical']:.1%}"
+                )
+            elif value < thresholds["script_success_rate"]["warning"]:
+                self._create_alert(
+                    metric_type=metric_type,
+                    current_value=value,
+                    threshold=thresholds["script_success_rate"]["warning"],
+                    severity="中",
+                    message=f"脚本成功率警告: {value:.1%} < {thresholds['script_success_rate']['warning']:.1%}"
+                )
+        
+        elif metric_type == MetricType.RECOVERY_TIME:
+            if value > thresholds["recovery_time"]["critical"]:
+                self._create_alert(
+                    metric_type=metric_type,
+                    current_value=value,
+                    threshold=thresholds["recovery_time"]["critical"],
+                    severity="严重",
+                    message=f"恢复时间过长: {value:.1f}s > {thresholds['recovery_time']['critical']}s"
+                )
+            elif value > thresholds["recovery_time"]["warning"]:
+                self._create_alert(
+                    metric_type=metric_type,
+                    current_value=value,
+                    threshold=thresholds["recovery_time"]["warning"],
+                    severity="中",
+                    message=f"恢复时间警告: {value:.1f}s > {thresholds['recovery_time']['warning']}s"
+                )
+    
+    def _create_alert(self, metric_type: MetricType, current_value: float, 
+                     threshold: float, severity: str, message: str):
+        """创建警报"""
+        alert_id = f"alert_{int(time.time())}_{metric_type.value}"
+        
+        alert = Alert(
+            alert_id=alert_id,
+            timestamp=datetime.now(),
+            severity=severity,
+            metric_type=metric_type,
+            current_value=current_value,
+            threshold=threshold,
+            message=message
+        )
+        
+        self.active_alerts.append(alert)
+        self.alert_history.append(alert)
+        self.stats["active_alerts_count"] = len(self.active_alerts)
+        
+        logger.warning(f"警报创建: {message}")
+        
+        # 触发警报处理
+        self._handle_alert(alert)
+        
+        return alert
+    
+    def _handle_alert(self, alert: Alert):
+        """处理警报"""
+        # 这里可以添加警报处理逻辑，比如：
+        # - 发送通知
+        # - 调整脚本行为
+        # - 记录详细日志
+        
+        if alert.severity in ["严重", "高"]:
+            logger.error(f"严重警报需要立即处理: {alert.message}")
+            # 可以触发紧急恢复措施
+        
+        elif alert.severity == "中":
+            logger.warning(f"中等警报: {alert.message}")
+            # 可以触发优化措施
+        
+        else:
+            logger.info(f"低级别警报: {alert.message}")
+            # 仅记录，不采取行动
+    
+    def resolve_alert(self, alert_id: str, resolution_message: str = "已解决"):
+        """解决警报"""
+        for i, alert in enumerate(self.active_alerts):
+            if alert.alert_id == alert_id:
+                alert.resolved = True
+                alert.resolved_at = datetime.now()
+                # 可以更新message添加解决信息
+                alert.message += f" - {resolution_message}"
+                
+                # 从活跃警报移到历史
+                resolved_alert = self.active_alerts.pop(i)
+                self.stats["active_alerts_count"] = len(self.active_alerts)
+                self.stats["alerts_resolved"] += 1
+                
+                logger.info(f"警报解决: {alert_id} - {resolution_message}")
+                return resolved_alert
+        
+        return None
+    
+    def _update_performance_scores(self):
+        """更新性能评分"""
+        # 网络稳定性评分（基于延迟和丢包）
+        latency_points = self.metrics_data.get(MetricType.NETWORK_LATENCY, [])
+        loss_points = self.metrics_data.get(MetricType.NETWORK_PACKET_LOSS, [])
+        
+        if latency_points and loss_points:
+            recent_latency = [p.value for p in latency_points[-10:]]
+            recent_loss = [p.value for p in loss_points[-10:]]
+            
+            if recent_latency and recent_loss:
+                avg_latency = statistics.mean(recent_latency)
+                avg_loss = statistics.mean(recent_loss)
+                
+                # 评分逻辑：延迟越低、丢包越少，分数越高
+                latency_score = max(0, 1 - (avg_latency / 500))  # 500ms为基准
+                loss_score = max(0, 1 - (avg_loss / 50))        # 50%为基准
+                
+                self.performance_scores["network_stability"] = (latency_score + loss_score) / 2
+        
+        # 脚本可靠性评分（基于成功率）
+        success_points = self.metrics_data.get(MetricType.SCRIPT_SUCCESS_RATE, [])
+        if success_points:
+            recent_success = [p.value for p in success_points[-10:]]
+            if recent_success:
+                self.performance_scores["script_reliability"] = statistics.mean(recent_success)
+        
+        # 恢复效率评分（基于恢复时间）
+        recovery_points = self.metrics_data.get(MetricType.RECOVERY_TIME, [])
+        if recovery_points:
+            recent_recovery = [p.value for p in recovery_points[-10:]]
+            if recent_recovery:
+                avg_recovery = statistics.mean(recent_recovery)
+                # 恢复时间越短，分数越高
+                recovery_score = max(0, 1 - (avg_recovery / 120))  # 120秒为基准
+                self.performance_scores["recovery_efficiency"] = recovery_score
+        
+        # 总体评分
+        scores = [v for v in self.performance_scores.values() if isinstance(v, (int, float))]
+        if scores:
+            self.performance_scores["overall_score"] = statistics.mean(scores)
+        
+        # 添加性能评分指标
+        self.add_metric(
+            MetricType.PERFORMANCE_SCORE,
+            self.performance_scores["overall_score"],
+            unit="分数",
+            tags={"component": "overall"}
+        )
+    
+    def get_summary(self) -> Dict:
+        """获取摘要信息"""
+        summary = {
+            "timestamp": datetime.now().isoformat(),
+            "performance_scores": self.performance_scores,
+            "active_alerts": len(self.active_alerts),
+            "metrics_collected": self.stats["total_metrics_collected"],
+            "recent_metrics": {},
+        }
+        
+        # 添加最近指标值
+        for metric_type, data_points in self.metrics_data.items():
+            if data_points:
+                recent = data_points[-1]
+                summary["recent_metrics"][metric_type.value] = {
+                    "value": recent.value,
+                    "unit": recent.unit,
+                    "timestamp": recent.timestamp.isoformat()
+                }
+        
+        return summary
+    
+    def generate_report(self, period_hours: int = 24) -> Dict:
+        """生成报告"""
+        end_time = datetime.now()
+        start_time = end_time - timedelta(hours=period_hours)
+        
+        report = {
+            "report_id": f"dashboard_report_{int(time.time())}",
+            "period": {
+                "start": start_time.isoformat(),
+                "end": end_time.isoformat(),
+                "hours": period_hours
+            },
+            "summary": self.get_summary(),
+            "detailed_analysis": {},
+            "recommendations": [],
+        }
+        
+        # 详细分析
+        for metric_type, data_points in self.metrics_data.items():
+            # 过滤时间范围内的数据
+            period_points = [p for p in data_points if start_time <= p.timestamp <= end_time]
+            
+            if period_points:
+                values = [p.value for p in period_points]
+                timestamps = [p.timestamp for p in period_points]
+                
+                analysis = {
+                    "count": len(values),
+                    "min": min(values) if values else 0,
+                    "max": max(values) if values else 0,
+                    "avg": statistics.mean(values) if values else 0,
+                    "std": statistics.stdev(values) if len(values) > 1 else 0,
+                    "first_timestamp":

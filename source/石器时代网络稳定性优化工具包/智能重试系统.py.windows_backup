@@ -1,0 +1,552 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+石器时代网络稳定性优化工具包 - 智能重试系统
+专门解决石器时代脚本因网络中断需要重试的核心模块
+
+功能:
+1. 智能判断何时需要重试
+2. 自适应重试策略（指数退避、随机延迟等）
+3. 重试成功率预测和优化
+4. 与ASSA脚本无缝集成，自动恢复执行
+
+设计原则:
+- 智能判断，避免无效重试
+- 自适应策略，根据网络状况调整
+- 状态保存，确保重试后能继续执行
+- 低侵入性，易于集成到现有脚本
+"""
+
+import time
+import random
+import json
+import logging
+from dataclasses import dataclass, asdict
+from typing import Dict, List, Optional, Callable, Any, Tuple
+from enum import Enum
+from datetime import datetime, timedelta
+import statistics
+
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('重试系统日志.log', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+
+class RetryStrategy(Enum):
+    """重试策略枚举"""
+    EXPONENTIAL_BACKOFF = "指数退避"  # 经典指数退避
+    FIXED_INTERVAL = "固定间隔"      # 固定时间间隔
+    RANDOM_BACKOFF = "随机退避"      # 随机时间退避
+    ADAPTIVE = "自适应"              # 根据网络状况自适应
+    HYBRID = "混合策略"              # 混合多种策略
+
+
+class RetryResult(Enum):
+    """重试结果枚举"""
+    SUCCESS = "成功"
+    FAILURE = "失败"
+    TIMEOUT = "超时"
+    ABORTED = "中止"
+    SKIPPED = "跳过"
+
+
+@dataclass
+class RetryAttempt:
+    """重试尝试数据类"""
+    attempt_id: str
+    timestamp: datetime
+    strategy: RetryStrategy
+    delay_before: float  # 重试前等待时间(秒)
+    execution_time: float  # 执行时间(秒)
+    result: RetryResult
+    error_message: Optional[str] = None
+    context_data: Optional[Dict] = None  # 上下文数据
+    
+    def to_dict(self) -> Dict:
+        """转换为字典"""
+        data = asdict(self)
+        data['timestamp'] = self.timestamp.isoformat()
+        data['strategy'] = self.strategy.value
+        data['result'] = self.result.value
+        return data
+
+
+@dataclass
+class RetryTask:
+    """重试任务数据类"""
+    task_id: str
+    task_name: str
+    function_to_retry: Callable
+    function_args: Tuple = ()
+    function_kwargs: Dict = None
+    max_attempts: int = 5
+    initial_delay: float = 1.0
+    max_delay: float = 60.0
+    timeout: Optional[float] = None
+    strategy: RetryStrategy = RetryStrategy.EXPONENTIAL_BACKOFF
+    success_condition: Optional[Callable] = None
+    on_success: Optional[Callable] = None
+    on_failure: Optional[Callable] = None
+    on_retry: Optional[Callable] = None
+    context: Optional[Dict] = None
+    
+    def __post_init__(self):
+        if self.function_kwargs is None:
+            self.function_kwargs = {}
+        if self.context is None:
+            self.context = {}
+
+
+class IntelligentRetrySystem:
+    """智能重试系统核心类"""
+    
+    def __init__(self, config_path: str = "重试系统配置.json"):
+        """
+        初始化智能重试系统
+        
+        Args:
+            config_path: 配置文件路径
+        """
+        self.config = self._load_config(config_path)
+        self.retry_history: List[RetryAttempt] = []
+        self.task_history: Dict[str, List[RetryAttempt]] = {}
+        self.active_tasks: Dict[str, RetryTask] = {}
+        
+        # 学习数据
+        self.learning_data = {
+            "success_rates": {},  # 各任务成功率
+            "avg_attempts": {},   # 平均尝试次数
+            "avg_delays": {},     # 平均延迟
+            "best_strategies": {}, # 最佳策略
+            "time_patterns": {},  # 时间模式
+            "network_correlation": {}  # 网络相关性
+        }
+        
+        # 统计信息
+        self.stats = {
+            "total_tasks": 0,
+            "successful_tasks": 0,
+            "failed_tasks": 0,
+            "total_attempts": 0,
+            "total_retry_time": 0.0,
+            "total_wait_time": 0.0,
+            "efficiency_score": 0.0,  # 效率评分
+        }
+        
+        logger.info("智能重试系统初始化完成")
+    
+    def _load_config(self, config_path: str) -> Dict:
+        """加载配置文件"""
+        default_config = {
+            "default_strategy": "EXPONENTIAL_BACKOFF",
+            "default_max_attempts": 5,
+            "default_initial_delay": 1.0,
+            "default_max_delay": 60.0,
+            "learning_enabled": True,
+            "adaptive_threshold": 0.7,  # 自适应阈值
+            "strategy_parameters": {
+                "exponential_backoff": {
+                    "base": 2.0,
+                    "jitter": 0.1,
+                    "cap_multiplier": 10.0
+                },
+                "fixed_interval": {
+                    "interval": 2.0,
+                    "jitter": 0.2
+                },
+                "random_backoff": {
+                    "min_delay": 0.5,
+                    "max_delay": 5.0
+                },
+                "adaptive": {
+                    "success_decay": 0.9,
+                    "failure_boost": 1.5,
+                    "min_delay": 0.1,
+                    "max_delay": 30.0
+                }
+            },
+            "network_aware": True,
+            "network_check_interval": 5.0,
+            "state_persistence": {
+                "enabled": True,
+                "save_interval": 60,
+                "backup_count": 5
+            },
+            "performance_optimization": {
+                "batch_size": 10,
+                "parallel_retries": 3,
+                "memory_limit_mb": 100
+            }
+        }
+        
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                user_config = json.load(f)
+                default_config.update(user_config)
+                logger.info(f"从 {config_path} 加载配置")
+        except FileNotFoundError:
+            logger.info(f"配置文件 {config_path} 不存在，使用默认配置")
+            # 保存默认配置
+            with open(config_path, 'w', encoding='utf-8') as f:
+                json.dump(default_config, f, ensure_ascii=False, indent=2)
+        
+        return default_config
+    
+    def _calculate_delay(self, attempt_num: int, strategy: RetryStrategy, 
+                        task_name: str = None) -> float:
+        """
+        计算重试延迟
+        
+        Args:
+            attempt_num: 尝试次数（从1开始）
+            strategy: 重试策略
+            task_name: 任务名称（用于自适应策略）
+            
+        Returns:
+            延迟时间(秒)
+        """
+        strategy_params = self.config["strategy_parameters"]
+        
+        if strategy == RetryStrategy.EXPONENTIAL_BACKOFF:
+            params = strategy_params["exponential_backoff"]
+            base = params["base"]
+            jitter = params["jitter"]
+            cap = params.get("cap_multiplier", 10.0) * self.config.get("default_initial_delay", 1.0)
+            
+            # 指数退避公式: delay = min(cap, base^(attempt-1) * initial_delay)
+            delay = min(cap, (base ** (attempt_num - 1)) * self.config.get("default_initial_delay", 1.0))
+            
+            # 添加随机抖动避免同步
+            if jitter > 0:
+                delay *= (1 + random.uniform(-jitter, jitter))
+            
+            return max(0.1, delay)
+        
+        elif strategy == RetryStrategy.FIXED_INTERVAL:
+            params = strategy_params["fixed_interval"]
+            interval = params["interval"]
+            jitter = params["jitter"]
+            
+            delay = interval
+            if jitter > 0:
+                delay *= (1 + random.uniform(-jitter, jitter))
+            
+            return max(0.1, delay)
+        
+        elif strategy == RetryStrategy.RANDOM_BACKOFF:
+            params = strategy_params["random_backoff"]
+            min_delay = params["min_delay"]
+            max_delay = params["max_delay"]
+            
+            return random.uniform(min_delay, max_delay)
+        
+        elif strategy == RetryStrategy.ADAPTIVE:
+            params = strategy_params["adaptive"]
+            min_delay = params["min_delay"]
+            max_delay = params["max_delay"]
+            
+            if task_name and task_name in self.learning_data["success_rates"]:
+                # 基于历史成功率调整延迟
+                success_rate = self.learning_data["success_rates"][task_name]
+                if success_rate > 0.8:
+                    # 高成功率，使用较短延迟
+                    delay = min_delay * 2
+                elif success_rate > 0.5:
+                    # 中等成功率，使用中等延迟
+                    delay = (min_delay + max_delay) / 2
+                else:
+                    # 低成功率，使用较长延迟
+                    delay = max_delay * 0.8
+            else:
+                # 无历史数据，使用指数退避
+                delay = min(max_delay, (2 ** (attempt_num - 1)) * min_delay)
+            
+            return max(min_delay, min(max_delay, delay))
+        
+        elif strategy == RetryStrategy.HYBRID:
+            # 混合策略：前两次使用固定间隔，之后使用指数退避
+            if attempt_num <= 2:
+                return self._calculate_delay(attempt_num, RetryStrategy.FIXED_INTERVAL, task_name)
+            else:
+                return self._calculate_delay(attempt_num, RetryStrategy.EXPONENTIAL_BACKOFF, task_name)
+        
+        else:
+            # 默认使用指数退避
+            return self._calculate_delay(attempt_num, RetryStrategy.EXPONENTIAL_BACKOFF, task_name)
+    
+    def _check_success_condition(self, result: Any, success_condition: Optional[Callable]) -> bool:
+        """
+        检查成功条件
+        
+        Args:
+            result: 函数执行结果
+            success_condition: 成功条件函数
+            
+        Returns:
+            是否成功
+        """
+        if success_condition is None:
+            # 默认成功条件：无异常抛出
+            return True
+        
+        try:
+            return bool(success_condition(result))
+        except Exception as e:
+            logger.warning(f"成功条件检查失败: {e}")
+            return False
+    
+    def _save_task_state(self, task: RetryTask, attempt_num: int):
+        """保存任务状态"""
+        if not self.config["state_persistence"]["enabled"]:
+            return
+        
+        state_file = f"task_state_{task.task_id}.json"
+        state = {
+            "task_id": task.task_id,
+            "task_name": task.task_name,
+            "attempt_num": attempt_num,
+            "context": task.context,
+            "timestamp": datetime.now().isoformat(),
+            "function_args": task.function_args,
+            "function_kwargs": task.function_kwargs
+        }
+        
+        try:
+            with open(state_file, 'w', encoding='utf-8') as f:
+                json.dump(state, f, ensure_ascii=False, indent=2)
+            logger.debug(f"任务状态已保存: {task.task_id}")
+        except Exception as e:
+            logger.error(f"保存任务状态失败: {e}")
+    
+    def _load_task_state(self, task_id: str) -> Optional[Dict]:
+        """加载任务状态"""
+        state_file = f"task_state_{task_id}.json"
+        try:
+            with open(state_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return None
+        except Exception as e:
+            logger.error(f"加载任务状态失败: {e}")
+            return None
+    
+    def _update_learning_data(self, task: RetryTask, attempts: List[RetryAttempt], 
+                            final_result: RetryResult):
+        """更新学习数据"""
+        if not self.config["learning_enabled"]:
+            return
+        
+        task_name = task.task_name
+        
+        # 更新成功率
+        if task_name not in self.learning_data["success_rates"]:
+            self.learning_data["success_rates"][task_name] = []
+        
+        success = 1 if final_result == RetryResult.SUCCESS else 0
+        self.learning_data["success_rates"][task_name].append(success)
+        
+        # 保持最近100条记录
+        if len(self.learning_data["success_rates"][task_name]) > 100:
+            self.learning_data["success_rates"][task_name].pop(0)
+        
+        # 更新平均尝试次数
+        if task_name not in self.learning_data["avg_attempts"]:
+            self.learning_data["avg_attempts"][task_name] = []
+        
+        self.learning_data["avg_attempts"][task_name].append(len(attempts))
+        if len(self.learning_data["avg_attempts"][task_name]) > 50:
+            self.learning_data["avg_attempts"][task_name].pop(0)
+        
+        # 更新最佳策略
+        if final_result == RetryResult.SUCCESS:
+            if task_name not in self.learning_data["best_strategies"]:
+                self.learning_data["best_strategies"][task_name] = {}
+            
+            strategy_name = task.strategy.value
+            self.learning_data["best_strategies"][task_name][strategy_name] = \
+                self.learning_data["best_strategies"][task_name].get(strategy_name, 0) + 1
+    
+    def _get_optimal_strategy(self, task_name: str) -> RetryStrategy:
+        """获取最优策略"""
+        if not self.config["learning_enabled"]:
+            return RetryStrategy[self.config["default_strategy"]]
+        
+        if task_name in self.learning_data["best_strategies"]:
+            strategies = self.learning_data["best_strategies"][task_name]
+            if strategies:
+                best_strategy = max(strategies.items(), key=lambda x: x[1])[0]
+                # 将字符串转换为枚举
+                for strategy in RetryStrategy:
+                    if strategy.value == best_strategy:
+                        return strategy
+        
+        # 默认策略
+        return RetryStrategy[self.config["default_strategy"]]
+    
+    def execute_with_retry(self, task: RetryTask) -> Any:
+        """
+        执行带重试的任务
+        
+        Args:
+            task: 重试任务
+            
+        Returns:
+            函数执行结果
+            
+        Raises:
+            Exception: 所有重试都失败后的异常
+        """
+        self.stats["total_tasks"] += 1
+        self.active_tasks[task.task_id] = task
+        
+        attempts = []
+        last_exception = None
+        start_time = time.time()
+        
+        logger.info(f"开始执行任务: {task.task_name} (ID: {task.task_id})")
+        
+        for attempt_num in range(1, task.max_attempts + 1):
+            attempt_id = f"{task.task_id}_attempt_{attempt_num}"
+            
+            # 计算延迟
+            delay = self._calculate_delay(attempt_num, task.strategy, task.task_name)
+            
+            # 如果不是第一次尝试，等待延迟
+            if attempt_num > 1:
+                logger.info(f"任务 {task.task_name} 第 {attempt_num} 次重试，等待 {delay:.1f} 秒")
+                self.stats["total_wait_time"] += delay
+                
+                if task.on_retry:
+                    try:
+                        task.on_retry(attempt_num, delay, task.context)
+                    except Exception as e:
+                        logger.error(f"重试回调函数出错: {e}")
+                
+                time.sleep(delay)
+            
+            # 执行函数
+            attempt_start = time.time()
+            try:
+                # 检查超时
+                if task.timeout:
+                    remaining_time = task.timeout - (time.time() - start_time)
+                    if remaining_time <= 0:
+                        logger.warning(f"任务 {task.task_name} 超时")
+                        result = RetryResult.TIMEOUT
+                        break
+                
+                # 执行函数
+                func_result = task.function_to_retry(
+                    *task.function_args, 
+                    **task.function_kwargs
+                )
+                execution_time = time.time() - attempt_start
+                
+                # 检查成功条件
+                if self._check_success_condition(func_result, task.success_condition):
+                    # 成功
+                    result = RetryResult.SUCCESS
+                    
+                    # 记录尝试
+                    attempt = RetryAttempt(
+                        attempt_id=attempt_id,
+                        timestamp=datetime.now(),
+                        strategy=task.strategy,
+                        delay_before=delay if attempt_num > 1 else 0,
+                        execution_time=execution_time,
+                        result=result,
+                        context_data=task.context.copy() if task.context else None
+                    )
+                    attempts.append(attempt)
+                    
+                    # 更新统计
+                    self.stats["successful_tasks"] += 1
+                    self.stats["total_attempts"] += attempt_num
+                    self.stats["total_retry_time"] += time.time() - start_time
+                    
+                    # 调用成功回调
+                    if task.on_success:
+                        task.on_success(result)
+                    
+                    # 保存任务状态
+                    self._save_task_state(task, attempt_num)
+                    
+                    # 更新学习数据
+                    self._update_learning_data(task, attempts, result)
+                    
+                    # 从活动任务中移除
+                    if task.task_id in self.active_tasks:
+                        del self.active_tasks[task.task_id]
+                    
+                    return func_result
+                
+                else:
+                    # 失败
+                    result = RetryResult.FAILURE
+                    last_exception = Exception(f"任务 {task.task_name} 第 {attempt_num} 次尝试失败")
+                    
+                    # 记录尝试
+                    attempt = RetryAttempt(
+                        attempt_id=attempt_id,
+                        timestamp=datetime.now(),
+                        strategy=task.strategy,
+                        delay_before=delay if attempt_num > 1 else 0,
+                        execution_time=execution_time,
+                        result=result,
+                        context_data=task.context.copy() if task.context else None
+                    )
+                    attempts.append(attempt)
+                    
+                    # 调用失败回调
+                    if task.on_failure:
+                        task.on_failure(attempt_num, last_exception, task.context)
+            
+            except Exception as e:
+                # 异常
+                result = RetryResult.EXCEPTION
+                last_exception = e
+                execution_time = time.time() - attempt_start
+                
+                logger.error(f"任务 {task.task_name} 第 {attempt_num} 次尝试异常: {e}")
+                
+                # 记录尝试
+                attempt = RetryAttempt(
+                    attempt_id=attempt_id,
+                    timestamp=datetime.now(),
+                    strategy=task.strategy,
+                    delay_before=delay if attempt_num > 1 else 0,
+                    execution_time=execution_time,
+                    result=result,
+                    context_data=task.context.copy() if task.context else None,
+                    exception=str(e)
+                )
+                attempts.append(attempt)
+                
+                # 调用异常回调
+                if task.on_exception:
+                    task.on_exception(attempt_num, e, task.context)
+        
+        # 所有尝试都失败
+        self.stats["failed_tasks"] += 1
+        self.stats["total_attempts"] += task.max_attempts
+        
+        # 保存最终状态
+        self._save_task_state(task, task.max_attempts)
+        self._update_learning_data(task, attempts, RetryResult.FAILURE)
+        
+        # 从活动任务中移除
+        if task.task_id in self.active_tasks:
+            del self.active_tasks[task.task_id]
+        
+        # 调用最终失败回调
+        if task.on_final_failure:
+            task.on_final_failure(task.max_attempts, last_exception, task.context)
+        
+        raise last_exception if last_exception else Exception(f"任务 {task.task_name} 所有尝试都失败")
